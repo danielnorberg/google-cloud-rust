@@ -8,7 +8,7 @@ use std::time::Duration;
 use google_cloud_gax::conn::{ConnectionOptions, Environment};
 use google_cloud_gax::grpc::{Code, Status};
 use google_cloud_gax::retry::{invoke_fn, TryAs};
-use google_cloud_googleapis::spanner::v1::{commit_request, transaction_options, Mutation, TransactionOptions};
+use google_cloud_googleapis::spanner::v1::{commit_request, transaction_options, Mutation, TransactionOptions, CommitResponse};
 use google_cloud_token::NopeTokenSourceProvider;
 
 use crate::apiv1::conn_pool::{ConnectionManager, SPANNER};
@@ -532,6 +532,50 @@ impl Client {
                 let mut tx = self.create_read_write_transaction::<E>(session, bo.clone()).await?;
                 let result = f(&mut tx).await;
                 tx.finish(result, Some(co.clone())).await
+            },
+            session,
+        )
+        .await
+    }
+
+    /// ReadWriteTransaction executes a read-write transaction, with retries as
+    /// necessary.
+    ///
+    /// The function f will be called one or more times. It must not maintain
+    /// any state between calls.
+    ///
+    /// If the transaction cannot be committed or if f returns an ABORTED error,
+    /// ReadWriteTransaction will call f again. It will continue to call f until the
+    /// transaction can be committed or the Context times out or is cancelled.  If f
+    /// returns an error other than ABORTED, ReadWriteTransaction will abort the
+    /// transaction and return the error.
+    ///
+    /// To limit the number of retries, set a deadline on the Context rather than
+    /// using a fixed limit on the number of attempts. ReadWriteTransaction will
+    /// retry as needed until that deadline is met.
+    ///
+    /// See <https://godoc.org/cloud.google.com/go/spanner#ReadWriteTransaction> for
+    /// more details.
+    pub async fn read_write_transaction_with_option2<'a, T, E, F>(
+        &'a self,
+        f: F,
+        options: ReadWriteTransactionOption,
+    ) -> Result<(Option<CommitResponse>, T), E>
+    where
+        E: TryAs<Status> + From<SessionError> + From<Status>,
+        F: for<'tx> Fn(&'tx mut ReadWriteTransaction) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'tx>>,
+    {
+        let (bo, co) = Client::split_read_write_transaction_option(options);
+
+        let ro = TransactionRetrySetting::default();
+        let session = Some(self.get_session().await?);
+        // must reuse session
+        invoke_fn(
+            Some(ro),
+            |session| async {
+                let mut tx = self.create_read_write_transaction::<E>(session, bo.clone()).await?;
+                let result = f(&mut tx).await;
+                tx.finish2(result, Some(co.clone())).await
             },
             session,
         )
