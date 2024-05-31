@@ -5,12 +5,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "auth")]
+pub use google_cloud_auth;
 use google_cloud_gax::conn::{ConnectionOptions, Environment};
 use google_cloud_gax::grpc::{Code, Status};
 use google_cloud_gax::retry::{invoke_fn, TryAs};
-use google_cloud_googleapis::spanner::v1::{
-    commit_request, transaction_options, CommitResponse, Mutation, TransactionOptions,
-};
+use google_cloud_googleapis::spanner::v1::{commit_request, transaction_options, Mutation, TransactionOptions};
 use google_cloud_token::NopeTokenSourceProvider;
 
 use crate::apiv1::conn_pool::{ConnectionManager, SPANNER};
@@ -19,7 +19,7 @@ use crate::session::{ManagedSession, SessionConfig, SessionError, SessionManager
 use crate::statement::Statement;
 use crate::transaction::{CallOptions, QueryOptions};
 use crate::transaction_ro::{BatchReadOnlyTransaction, ReadOnlyTransaction};
-use crate::transaction_rw::{commit, CommitOptions, ReadWriteTransaction};
+use crate::transaction_rw::{commit, CommitOptions, CommitResult, ReadWriteTransaction};
 use crate::value::{Timestamp, TimestampBound};
 
 #[derive(Clone, Default)]
@@ -96,9 +96,6 @@ impl Default for ClientConfig {
         config
     }
 }
-
-#[cfg(feature = "auth")]
-pub use google_cloud_auth;
 
 #[cfg(feature = "auth")]
 impl ClientConfig {
@@ -525,7 +522,7 @@ impl Client {
     {
         self.read_write_transaction_with_stats(f, options)
             .await
-            .map(|(r, v)| (r.and_then(|r| r.commit_timestamp.into()), v))
+            .map(|(r, v)| (r.and_then(|r| r.timestamp), v))
     }
 
     /// ReadWriteTransaction executes a read-write transaction, with retries as
@@ -550,7 +547,7 @@ impl Client {
         &'a self,
         f: F,
         options: ReadWriteTransactionOption,
-    ) -> Result<(Option<CommitResponse>, T), E>
+    ) -> Result<(Option<CommitResult>, T), E>
     where
         E: TryAs<Status> + From<SessionError> + From<Status>,
         F: for<'tx> Fn(&'tx mut ReadWriteTransaction) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'tx>>,
@@ -646,7 +643,7 @@ impl Client {
                 let result = f(&mut tx);
                 tx.finish(result, Some(co.clone()))
                     .await
-                    .map(|(r, v)| (r.and_then(|r| r.commit_timestamp.into()), v))
+                    .map(|(r, v)| (r.and_then(|r| r.timestamp), v))
             },
             session,
         )
