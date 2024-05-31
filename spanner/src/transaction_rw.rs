@@ -233,26 +233,12 @@ impl ReadWriteTransaction {
     where
         E: TryAs<Status> + From<Status>,
     {
-        let opt = options.unwrap_or_default();
-        match result {
-            Ok(success) => {
-                let cr = self.commit(opt).await?;
-                Ok((cr.commit_timestamp.map(|e| e.into()), success))
-            }
-            Err(err) => {
-                if let Some(status) = err.try_as() {
-                    // can't rollback. should retry
-                    if status.code() == Code::Aborted {
-                        return Err(err);
-                    }
-                }
-                let _ = self.rollback(opt.call_options.retry).await;
-                Err(err)
-            }
-        }
+        self.end_with_stats(result, options)
+            .await
+            .map(|(r, v)| (r.and_then(|r| r.commit_timestamp.into()), v))
     }
 
-    pub async fn end2<S, E>(
+    pub async fn end_with_stats<S, E>(
         &mut self,
         result: Result<S, E>,
         options: Option<CommitOptions>,
@@ -280,50 +266,6 @@ impl ReadWriteTransaction {
     }
 
     pub(crate) async fn finish<T, E>(
-        &mut self,
-        result: Result<T, E>,
-        options: Option<CommitOptions>,
-    ) -> Result<(Option<Timestamp>, T), (E, Option<ManagedSession>)>
-    where
-        E: TryAs<Status> + From<Status>,
-    {
-        let opt = options.unwrap_or_default();
-
-        return match result {
-            Ok(s) => match self.commit(opt).await {
-                Ok(c) => Ok((c.commit_timestamp.map(|ts| ts.into()), s)),
-                // Retry the transaction using the same session on ABORT error.
-                // Cloud Spanner will create the new transaction with the previous
-                // one's wound-wait priority.
-                Err(e) => Err((E::from(e), self.take_session())),
-            },
-
-            // Rollback the transaction unless the error occurred during the
-            // commit. Executing a rollback after a commit has failed will
-            // otherwise cause an error. Note that transient errors, such as
-            // UNAVAILABLE, are already handled in the gRPC layer and do not show
-            // up here. Context errors (deadline exceeded / canceled) during
-            // commits are also not rolled back.
-            Err(err) => {
-                let status = match err.try_as() {
-                    Some(status) => status,
-                    None => {
-                        let _ = self.rollback(opt.call_options.retry).await;
-                        return Err((err, self.take_session()));
-                    }
-                };
-                match status.code() {
-                    Code::Aborted => Err((err, self.take_session())),
-                    _ => {
-                        let _ = self.rollback(opt.call_options.retry).await;
-                        return Err((err, self.take_session()));
-                    }
-                }
-            }
-        };
-    }
-
-    pub(crate) async fn finish2<T, E>(
         &mut self,
         result: Result<T, E>,
         options: Option<CommitOptions>,

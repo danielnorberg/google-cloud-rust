@@ -8,7 +8,9 @@ use std::time::Duration;
 use google_cloud_gax::conn::{ConnectionOptions, Environment};
 use google_cloud_gax::grpc::{Code, Status};
 use google_cloud_gax::retry::{invoke_fn, TryAs};
-use google_cloud_googleapis::spanner::v1::{commit_request, transaction_options, Mutation, TransactionOptions, CommitResponse};
+use google_cloud_googleapis::spanner::v1::{
+    commit_request, transaction_options, CommitResponse, Mutation, TransactionOptions,
+};
 use google_cloud_token::NopeTokenSourceProvider;
 
 use crate::apiv1::conn_pool::{ConnectionManager, SPANNER};
@@ -521,21 +523,9 @@ impl Client {
         E: TryAs<Status> + From<SessionError> + From<Status>,
         F: for<'tx> Fn(&'tx mut ReadWriteTransaction) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'tx>>,
     {
-        let (bo, co) = Client::split_read_write_transaction_option(options);
-
-        let ro = TransactionRetrySetting::default();
-        let session = Some(self.get_session().await?);
-        // must reuse session
-        invoke_fn(
-            Some(ro),
-            |session| async {
-                let mut tx = self.create_read_write_transaction::<E>(session, bo.clone()).await?;
-                let result = f(&mut tx).await;
-                tx.finish(result, Some(co.clone())).await
-            },
-            session,
-        )
-        .await
+        self.read_write_transaction_with_stats(f, options)
+            .await
+            .map(|(r, v)| (r.and_then(|r| r.commit_timestamp.into()), v))
     }
 
     /// ReadWriteTransaction executes a read-write transaction, with retries as
@@ -556,7 +546,7 @@ impl Client {
     ///
     /// See <https://godoc.org/cloud.google.com/go/spanner#ReadWriteTransaction> for
     /// more details.
-    pub async fn read_write_transaction_with_option2<'a, T, E, F>(
+    pub async fn read_write_transaction_with_stats<'a, T, E, F>(
         &'a self,
         f: F,
         options: ReadWriteTransactionOption,
@@ -575,7 +565,7 @@ impl Client {
             |session| async {
                 let mut tx = self.create_read_write_transaction::<E>(session, bo.clone()).await?;
                 let result = f(&mut tx).await;
-                tx.finish2(result, Some(co.clone())).await
+                tx.finish(result, Some(co.clone())).await
             },
             session,
         )
@@ -654,7 +644,9 @@ impl Client {
             |session| async {
                 let mut tx = self.create_read_write_transaction::<E>(session, bo.clone()).await?;
                 let result = f(&mut tx);
-                tx.finish(result, Some(co.clone())).await
+                tx.finish(result, Some(co.clone()))
+                    .await
+                    .map(|(r, v)| (r.and_then(|r| r.commit_timestamp.into()), v))
             },
             session,
         )
