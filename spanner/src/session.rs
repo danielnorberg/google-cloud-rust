@@ -206,16 +206,15 @@ struct SessionPool {
 }
 
 impl SessionPool {
-    async fn new(
-        database: String,
+    fn new(
         conn_pool: &ConnectionManager,
         session_creation_sender: UnboundedSender<usize>,
         config: Arc<SessionConfig>,
     ) -> Result<Self, Status> {
-        let available_sessions = Self::init_pool(database, conn_pool, config.min_opened).await?;
+        Self::init_pool(conn_pool, config.min_opened, &session_creation_sender)?;
         Ok(SessionPool {
             inner: Arc::new(RwLock::new(Sessions {
-                available_sessions,
+                available_sessions: VecDeque::new(),
                 waiters: VecDeque::new(),
                 orphans: Vec::new(),
                 num_inuse: 0,
@@ -226,17 +225,14 @@ impl SessionPool {
         })
     }
 
-    async fn init_pool(
-        database: String,
+    fn init_pool(
         conn_pool: &ConnectionManager,
         min_opened: usize,
-    ) -> Result<VecDeque<SessionHandle>, Status> {
+        session_creation_sender: &UnboundedSender<usize>,
+    ) -> Result<(), Status> {
         let channel_num = conn_pool.num();
         let creation_count_per_channel = min_opened / channel_num;
         let remainder = min_opened % channel_num;
-
-        let mut sessions = Vec::<SessionHandle>::new();
-        let mut tasks = JoinSet::new();
         for _ in 0..channel_num {
             // Ensure that we create the exact number of requested sessions by adding the remainder to the first channel.
             let creation_count = if channel_num == 0 {
@@ -244,16 +240,11 @@ impl SessionPool {
             } else {
                 creation_count_per_channel
             };
-            let next_client = conn_pool.conn();
-            let database = database.clone();
-            tasks.spawn(async move { batch_create_sessions(next_client, &database, creation_count).await });
+            session_creation_sender
+                .send(creation_count)
+                .map_err(|e| Status::from_error(e.into()))?;
         }
-        while let Some(r) = tasks.join_next().await {
-            let new_sessions = r.map_err(|e| Status::from_error(e.into()))??;
-            sessions.extend(new_sessions);
-        }
-        tracing::debug!("initial session created count = {}", sessions.len());
-        Ok(sessions.into())
+        Ok(())
     }
 
     fn num_opened(&self) -> usize {
@@ -460,7 +451,7 @@ impl SessionManager {
     ) -> Result<Arc<SessionManager>, Status> {
         let database = database.into();
         let (sender, receiver) = mpsc::unbounded_channel();
-        let session_pool = SessionPool::new(database.clone(), &conn_pool, sender, Arc::new(config.clone())).await?;
+        let session_pool = SessionPool::new(&conn_pool, sender, Arc::new(config.clone()))?;
 
         let cancel = CancellationToken::new();
         let task_session_cleaner = Self::spawn_health_check_task(config, session_pool.clone(), cancel.clone());
