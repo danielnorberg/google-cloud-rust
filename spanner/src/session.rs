@@ -444,7 +444,7 @@ pub(crate) struct SessionManager {
 }
 
 impl SessionManager {
-    pub async fn new(
+    pub fn new(
         database: impl Into<String>,
         conn_pool: ConnectionManager,
         config: SessionConfig,
@@ -674,7 +674,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let sm = SessionManager::new(DATABASE, cm, config).await.unwrap();
+        let sm = SessionManager::new(DATABASE, cm, config).unwrap();
 
         let counter = Arc::new(AtomicI64::new(0));
         let mut spawns = Vec::with_capacity(100);
@@ -714,7 +714,7 @@ mod tests {
             max_opened: 5,
             ..Default::default()
         };
-        let sm = std::sync::Arc::new(SessionManager::new(DATABASE, cm, config).await.unwrap());
+        let sm = std::sync::Arc::new(SessionManager::new(DATABASE, cm, config).unwrap());
         sleep(Duration::from_secs(1)).await;
 
         let cancel = CancellationToken::new();
@@ -743,7 +743,7 @@ mod tests {
             max_opened: 5,
             ..Default::default()
         };
-        let sm = Arc::new(SessionManager::new(DATABASE, cm, config).await.unwrap());
+        let sm = Arc::new(SessionManager::new(DATABASE, cm, config).unwrap());
         sleep(Duration::from_secs(1)).await;
 
         let cancel = CancellationToken::new();
@@ -772,7 +772,7 @@ mod tests {
             max_opened: 45,
             ..Default::default()
         };
-        let sm = SessionManager::new(DATABASE, conn_pool, config).await.unwrap();
+        let sm = SessionManager::new(DATABASE, conn_pool, config).unwrap();
         {
             let mut sessions = Vec::new();
             for _ in 0..45 {
@@ -812,7 +812,7 @@ mod tests {
             session_get_timeout: Duration::from_secs(1),
             ..Default::default()
         };
-        let sm = Arc::new(SessionManager::new(DATABASE, conn_pool, config.clone()).await.unwrap());
+        let sm = Arc::new(SessionManager::new(DATABASE, conn_pool, config.clone()).unwrap());
         let mu = Arc::new(RwLock::new(Vec::new()));
         let mut awaiters = Vec::with_capacity(100);
         for _ in 0..100 {
@@ -1068,7 +1068,7 @@ mod tests {
         .await
         .unwrap();
         let config = SessionConfig::default();
-        let sm = SessionManager::new(DATABASE, cm, config.clone()).await.unwrap();
+        let sm = SessionManager::new(DATABASE, cm, config.clone()).unwrap();
         assert_eq!(sm.num_opened(), config.min_opened);
         sm.close().await;
         assert_eq!(sm.num_opened(), 0);

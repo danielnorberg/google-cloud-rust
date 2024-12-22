@@ -182,7 +182,7 @@ impl Client {
         };
         let conn_pool =
             ConnectionManager::new(pool_size, &config.environment, config.endpoint.as_str(), &options).await?;
-        let session_manager = SessionManager::new(database, conn_pool, config.session_config).await?;
+        let session_manager = SessionManager::new(database, conn_pool, config.session_config)?;
 
         Ok(Client {
             sessions: session_manager,
