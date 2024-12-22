@@ -12,6 +12,8 @@ use google_cloud_googleapis::spanner::v1::{
     PartitionReadRequest, PartitionResponse, ReadRequest, ResultSet, RollbackRequest, Session, Transaction,
 };
 
+const RESOURCE_PREFIX_HEADER: &str = "google-cloud-resource-prefix";
+
 pub(crate) fn ping_query_request(session_name: impl Into<String>) -> ExecuteSqlRequest {
     ExecuteSqlRequest {
         session: session_name.into(),
@@ -84,7 +86,8 @@ impl Client {
         invoke_fn(
             Some(setting),
             |spanner_client| async {
-                let request = create_request(format!("database={database}"), req.clone());
+                let mut request = create_request(format!("database={database}"), req.clone());
+                request.metadata_mut().insert(RESOURCE_PREFIX_HEADER, database.parse().unwrap());
                 spanner_client
                     .create_session(request)
                     .await
@@ -110,7 +113,8 @@ impl Client {
         invoke_fn(
             Some(setting),
             |spanner_client| async {
-                let request = create_request(format!("database={database}"), req.clone());
+                let mut request = create_request(format!("database={database}"), req.clone());
+                request.metadata_mut().insert(RESOURCE_PREFIX_HEADER, database.parse().unwrap());
                 spanner_client
                     .batch_create_sessions(request)
                     .await
