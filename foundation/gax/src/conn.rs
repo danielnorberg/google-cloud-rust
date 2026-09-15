@@ -17,6 +17,14 @@ use token_source::{TokenSource, TokenSourceProvider};
 
 pub type Channel = AsyncFilter<TonicChannel, AsyncAuthInterceptor>;
 
+/// Construct an unused transport for session-pool unit tests without network I/O.
+pub fn cancellation_repro_channel() -> Channel {
+    let channel = Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+    ServiceBuilder::new()
+        .filter_async(AsyncAuthInterceptor::empty())
+        .service(channel)
+}
+
 #[derive(Clone, Debug)]
 pub struct AsyncAuthInterceptor {
     token_source: Option<Arc<dyn TokenSource>>,

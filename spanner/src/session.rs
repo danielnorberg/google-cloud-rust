@@ -751,6 +751,93 @@ pub(crate) fn client_metadata(database: &str) -> MetadataMap {
 }
 
 #[cfg(test)]
+mod cancellation_repro {
+    use super::*;
+    use google_cloud_googleapis::spanner::v1::spanner_client::SpannerClient;
+    use std::future::{poll_fn, Future};
+    use std::task::Poll;
+
+    fn pool() -> SessionPool {
+        let now = Instant::now();
+        let client = Client::new(SpannerClient::new(google_cloud_gax::conn::cancellation_repro_channel()));
+        let handle = SessionHandle::new(Session::default(), client, now);
+        let (session_creation_sender, _) = mpsc::unbounded_channel();
+        SessionPool {
+            inner: Arc::new(RwLock::new(Sessions {
+                available_sessions: VecDeque::from([handle]),
+                waiters: VecDeque::new(),
+                orphans: Vec::new(),
+                num_inuse: 0,
+                num_creating: 0,
+                max_inuse_window: 0,
+                window_started_at: now,
+            })),
+            session_creation_sender,
+            config: Arc::new(SessionConfig {
+                max_opened: 1,
+                min_opened: 1,
+                max_idle: 1,
+                session_get_timeout: Duration::from_secs(1),
+                ..Default::default()
+            }),
+            metrics: Arc::new(MetricsRecorder::default()),
+        }
+    }
+
+    async fn run(cancel_after_notification: bool) {
+        let pool = pool();
+        let held = pool.acquire().await.unwrap();
+        let mut first = Box::pin(pool.acquire());
+        let mut second = Box::pin(pool.acquire());
+        poll_fn(|cx| {
+            assert!(first.as_mut().poll(cx).is_pending());
+            assert!(second.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(pool.inner.read().waiters.len(), 2);
+
+        if cancel_after_notification {
+            // Returning the only session notifies A, but A is never polled again.
+            drop(held);
+            assert_eq!(pool.inner.read().waiters.len(), 1);
+            drop(first);
+        } else {
+            // A cancellation before notification is the control case.
+            drop(first);
+            drop(held);
+        }
+
+        let result = second.await;
+        match result {
+            Ok(session) => {
+                println!("B acquired the session; cancel_after_notification={cancel_after_notification}");
+                drop(session);
+            }
+            Err(err) => {
+                let state = pool.inner.read();
+                panic!(
+                    "B failed: {err}; idle={}, in_use={}, waiters={}",
+                    state.available_sessions.len(),
+                    state.num_inuse,
+                    state.waiters.len()
+                );
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_before_notification_preserves_progress() {
+        run(false).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_after_notification_preserves_progress() {
+        run(true).await;
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Arc;
