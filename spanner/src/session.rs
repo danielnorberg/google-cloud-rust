@@ -792,7 +792,8 @@ mod cancellation_repro {
         (pool, peer)
     }
 
-    async fn run(cancel_after_notification: bool) {
+    #[tokio::test]
+    async fn cancellation_before_notification_preserves_progress() {
         let (pool, _peer) = pool().await;
         tokio::time::pause();
         let held = pool.acquire().await.unwrap();
@@ -806,43 +807,43 @@ mod cancellation_repro {
         .await;
         assert_eq!(pool.inner.read().waiters.len(), 2);
 
-        if cancel_after_notification {
-            // Returning the only session notifies A, but A is never polled again.
-            drop(held);
-            assert_eq!(pool.inner.read().waiters.len(), 1);
-            drop(first);
-        } else {
-            // A cancellation before notification is the control case.
-            drop(first);
-            drop(held);
-        }
+        drop(first);
+        drop(held);
 
-        let result = second.await;
-        match result {
-            Ok(session) => {
-                println!("B acquired the session; cancel_after_notification={cancel_after_notification}");
-                drop(session);
-            }
-            Err(err) => {
-                let state = pool.inner.read();
-                panic!(
-                    "B failed: {err}; idle={}, in_use={}, waiters={}",
-                    state.available_sessions.len(),
-                    state.num_inuse,
-                    state.waiters.len()
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn cancellation_before_notification_preserves_progress() {
-        run(false).await;
+        let _session = second
+            .await
+            .expect("the remaining waiter should acquire the returned session");
     }
 
     #[tokio::test]
     async fn cancellation_after_notification_preserves_progress() {
-        run(true).await;
+        let (pool, _peer) = pool().await;
+        tokio::time::pause();
+        let held = pool.acquire().await.unwrap();
+        let mut first = Box::pin(pool.acquire());
+        let mut second = Box::pin(pool.acquire());
+        poll_fn(|cx| {
+            assert!(first.as_mut().poll(cx).is_pending());
+            assert!(second.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(pool.inner.read().waiters.len(), 2);
+
+        // Returning the only session notifies the first waiter, which is never polled again.
+        drop(held);
+        assert_eq!(pool.inner.read().waiters.len(), 1);
+        drop(first);
+
+        let _session = second.await.unwrap_or_else(|err| {
+            let state = pool.inner.read();
+            panic!(
+                "remaining waiter failed: {err}; idle={}, in_use={}, waiters={}",
+                state.available_sessions.len(),
+                state.num_inuse,
+                state.waiters.len()
+            );
+        });
     }
 }
 
