@@ -751,13 +751,40 @@ pub(crate) fn client_metadata(database: &str) -> MetadataMap {
 }
 
 #[cfg(test)]
-mod cancellation_repro {
-    use super::*;
-    use google_cloud_gax::conn::{ConnectionOptions, Environment};
+mod tests {
+    use std::collections::VecDeque;
     use std::future::{poll_fn, Future};
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::sync::Arc;
     use std::task::Poll;
+    use std::time::{Duration, Instant};
 
-    async fn pool() -> (SessionPool, tokio::net::TcpStream) {
+    use parking_lot::RwLock;
+    use serial_test::serial;
+    use tokio::sync::mpsc;
+    use tokio::time::sleep;
+    use tokio_util::sync::CancellationToken;
+
+    use google_cloud_gax::conn::{ConnectionOptions, Environment};
+    use google_cloud_googleapis::spanner::v1::{ExecuteSqlRequest, Session};
+
+    use crate::apiv1::conn_pool::ConnectionManager;
+    use crate::metrics::MetricsRecorder;
+    use crate::session::{
+        batch_create_sessions, client_metadata, health_check, SessionConfig, SessionError, SessionHandle,
+        SessionManager, SessionPool, Sessions,
+    };
+
+    pub const DATABASE: &str = "projects/local-project/instances/test-instance/databases/local-database";
+
+    #[ctor::ctor]
+    fn init() {
+        let filter = tracing_subscriber::filter::EnvFilter::from_default_env()
+            .add_directive("google_cloud_spanner=trace".parse().unwrap());
+        let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+    }
+
+    async fn single_session_pool() -> (SessionPool, tokio::net::TcpStream) {
         // These tests never issue an RPC, so the transport only needs a TCP peer.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let environment = Environment::Emulator(listener.local_addr().unwrap().to_string());
@@ -794,7 +821,7 @@ mod cancellation_repro {
 
     #[tokio::test]
     async fn cancellation_before_notification_preserves_progress() {
-        let (pool, _peer) = pool().await;
+        let (pool, _peer) = single_session_pool().await;
         tokio::time::pause();
         let held = pool.acquire().await.unwrap();
         let mut first = Box::pin(pool.acquire());
@@ -817,7 +844,7 @@ mod cancellation_repro {
 
     #[tokio::test]
     async fn cancellation_after_notification_preserves_progress() {
-        let (pool, _peer) = pool().await;
+        let (pool, _peer) = single_session_pool().await;
         tokio::time::pause();
         let held = pool.acquire().await.unwrap();
         let mut first = Box::pin(pool.acquire());
@@ -844,36 +871,6 @@ mod cancellation_repro {
                 state.waiters.len()
             );
         });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::atomic::{AtomicI64, Ordering};
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-
-    use parking_lot::RwLock;
-    use serial_test::serial;
-    use tokio::time::sleep;
-    use tokio_util::sync::CancellationToken;
-
-    use google_cloud_gax::conn::{ConnectionOptions, Environment};
-    use google_cloud_googleapis::spanner::v1::ExecuteSqlRequest;
-
-    use crate::apiv1::conn_pool::ConnectionManager;
-    use crate::metrics::MetricsRecorder;
-    use crate::session::{
-        batch_create_sessions, client_metadata, health_check, SessionConfig, SessionError, SessionManager,
-    };
-
-    pub const DATABASE: &str = "projects/local-project/instances/test-instance/databases/local-database";
-
-    #[ctor::ctor]
-    fn init() {
-        let filter = tracing_subscriber::filter::EnvFilter::from_default_env()
-            .add_directive("google_cloud_spanner=trace".parse().unwrap());
-        let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
     }
 
     async fn assert_rush(use_invalidate: bool, config: SessionConfig) -> Arc<SessionManager> {
