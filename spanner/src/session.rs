@@ -753,16 +753,23 @@ pub(crate) fn client_metadata(database: &str) -> MetadataMap {
 #[cfg(test)]
 mod cancellation_repro {
     use super::*;
-    use google_cloud_googleapis::spanner::v1::spanner_client::SpannerClient;
+    use google_cloud_gax::conn::{ConnectionOptions, Environment};
     use std::future::{poll_fn, Future};
     use std::task::Poll;
 
-    fn pool() -> SessionPool {
+    async fn pool() -> (SessionPool, tokio::net::TcpStream) {
+        // These tests never issue an RPC, so the transport only needs a TCP peer.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let environment = Environment::Emulator(listener.local_addr().unwrap().to_string());
+        let options = ConnectionOptions::default();
+        let (connection, peer) =
+            tokio::join!(ConnectionManager::new(1, &environment, "", &options), listener.accept(),);
+        let client = connection.unwrap().conn();
+        let (peer, _) = peer.unwrap();
         let now = Instant::now();
-        let client = Client::new(SpannerClient::new(google_cloud_gax::conn::cancellation_repro_channel()));
         let handle = SessionHandle::new(Session::default(), client, now);
         let (session_creation_sender, _) = mpsc::unbounded_channel();
-        SessionPool {
+        let pool = SessionPool {
             inner: Arc::new(RwLock::new(Sessions {
                 available_sessions: VecDeque::from([handle]),
                 waiters: VecDeque::new(),
@@ -781,11 +788,13 @@ mod cancellation_repro {
                 ..Default::default()
             }),
             metrics: Arc::new(MetricsRecorder::default()),
-        }
+        };
+        (pool, peer)
     }
 
     async fn run(cancel_after_notification: bool) {
-        let pool = pool();
+        let (pool, _peer) = pool().await;
+        tokio::time::pause();
         let held = pool.acquire().await.unwrap();
         let mut first = Box::pin(pool.acquire());
         let mut second = Box::pin(pool.acquire());
@@ -826,12 +835,12 @@ mod cancellation_repro {
         }
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn cancellation_before_notification_preserves_progress() {
         run(false).await;
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn cancellation_after_notification_preserves_progress() {
         run(true).await;
     }
